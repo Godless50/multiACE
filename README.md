@@ -275,7 +275,7 @@ Spools without RFID tags work fine - you can set the filament type and color man
 Before installing multiACE, ensure the following:
 
 1. **Firmware** - Install Snapmaker firmware 1.2+ or PAXX firmware 12-14+ on your Snapmaker U1
-2. **Enable Root Access** - On the Snapmaker display, go to Settings > About > tap firmware version 10 times to unlock Advanced Mode, then enable Root Access 
+2. **Enable Root Access** - On the Snapmaker display, go to Settings to unlock Advanced Mode, then enable Root Access 
 3. **Enable SSH** - Connect via SSH or serial console and run:
    ```
    touch /oem/.debug
