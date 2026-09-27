@@ -2,8 +2,10 @@
 
 > [!IMPORTANT]
 > **multiACE is in the running for the Snapmaker U1 Innovation Fund.** The fund backs
-> open-source projects for the U1. Community voting is open until Sep 30.
-
+> open-source projects for the U1. Community voting is open until Sep 30. Pick your
+> favorite projects.
+>
+> [![Vote here](https://img.shields.io/badge/Vote%20here-0d9488?style=for-the-badge)](https://www.snapmaker.com/innovation-fund#vote)
 
 Started as a SnapACE fork, it has grown to over 5 times the original size, with around 90% of the code now its own and many unique features:
 
