@@ -1,5 +1,11 @@
 # mUlt1ACE 
 
+> [!IMPORTANT]
+> **multiACE is in the running for the Snapmaker U1 Innovation Fund.** The fund backs
+> open-source projects for the U1. Community voting is open until Sep 30.
+>
+> [![Vote for multiACE](https://img.shields.io/badge/Snapmaker%20U1%20Innovation%20Fund-Vote%20for%20multiACE-0d9488?style=for-the-badge)](VOTE-URL)
+
 Started as a SnapACE fork, it has grown to over 5 times the original size, with around 90% of the code now its own and many unique features:
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/K3K610R4F9)
