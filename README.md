@@ -29,8 +29,8 @@ re-plan live in the browser. Manual heads take part in the multi preflight as pi
 **Manual heads.** in multi mode now appear in preflight
 
 **RFID tags:** **read** the UID of any tag, read and **write** for open tags (ACE2-Open units). Not every tag's content can be read, but the card UID can be read from every tag (Bambu, Snapmaker, Anycubic, OpenSpool, blank), so any spool can be identified. OpenSpool and blank NTAG tags are read automatically when the spool is inserted; the picker gets Read tag and Write to tag buttons (OpenSpool or Anycubic format, optionally with the card UID as SKU so every ACE (V1, V2 Stock) recognises the spool).
-**Tag reading hardened.** A card is attributed by rotating the neighbour lane, never by guessing; the neighbour's card is never stored as this slot's identity, and a read that only sees the neighbour's card says so (unload that head, then re-insert). MIFARE (Bambu) spools are read at the hit without the centering dance; cascade artefacts are no UIDs. The tag line is on for every ACE2-Open unit, the `rc522` switch is gone. An OpenSpool, Prusament or Creality format name reported by the on-chip decoder is never taken as a
-spool id.
+**Tag reading hardened.** 
+
 **Spool inserted mid-print** The unit's pull-in is stopped right after the bite so it cannot push a second strand into the combiner while the neighbour lane prints; the tag is read at the end of the print if possible.
 
 **ACE2-Open firmware - flash from the web UI.** Flash an ACE 2 Pro straight from the
