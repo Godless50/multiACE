@@ -9,20 +9,31 @@ Started as a SnapACE fork, it has grown to over 5 times the original size, with 
 
 
 
-## What's new in multiACE 1.00.1b
+## What's new in multiACE 1.10b
+
+**Multifilament optimisation.** One colour may sit on several heads: put a second spool
+of the same colour on a free slot and the preflight spreads that colour over both heads,
+so fewer swaps are needed (a 6 colour print with 28 swaps came down to 7). Works in head
+mode and in multi mode, with a max-copies setting and a strict colour switch; the plans
+re-plan live in the browser. Manual heads take part in the multi preflight as pinned heads.
+
+**Calibrate button in the PA dialog**
+
+**Manual heads.** in multi mode now appear in preflight
 
 **RFID tags:** **read** the UID of any tag, read and **write** for open tags (ACE2-Open units). Not every tag's content can be read, but the card UID can be read from every tag (Bambu, Snapmaker, Anycubic, OpenSpool, blank), so any spool can be identified. OpenSpool and blank NTAG tags are read automatically when the spool is inserted; the picker gets Read tag and Write to tag buttons (OpenSpool or Anycubic format, optionally with the card UID as SKU so every ACE (V1, V2 Stock) recognises the spool).
-**Experimental:** tag reading and writing has so far been tested on a single printer
-with one set of ACE 2 Pro units - expect rough edges and report what you see.
-And due to the ACE 2 hardware only one side of a spool can be written - a spool with a tag
-on each flange gets the tag facing the reader written, the other side stays as it is.
-
+**Tag reading hardened.** A card is attributed by rotating the neighbour lane, never by guessing; the neighbour's card is never stored as this slot's identity, and a read that only sees the neighbour's card says so (unload that head, then re-insert). MIFARE (Bambu) spools are read at the hit without the centering dance; cascade artefacts are no UIDs. The tag line is on for every ACE2-Open unit, the `rc522` switch is gone. An OpenSpool, Prusament or Creality format name reported by the on-chip decoder is never taken as a
+spool id.
+**Spool inserted mid-print** The unit's pull-in is stopped right after the bite so it cannot push a second strand into the combiner while the neighbour lane prints; the tag is read at the end of the print if possible.
 
 **ACE2-Open firmware - flash from the web UI.** Flash an ACE 2 Pro straight from the
 Config tab: stock 1.1.31, or patch automatically to **ACE2-Open** build. A big thank you to
 **[Simon-CR](https://github.com/Simon-CR/ace2-pro-firmware-research)** - his ACE 2 Pro
 firmware research and the ACE2-Open UID passthrough are what make everything below
 possible. (Flashing is at your own risk - never during a print, never unplug.)
+
+**ACE2-Open flash target 1.1.60O.** The web flash offers 1.1.60O (the newest build that
+is verified to run); 
 
 **Spools bound by card UID.** A spool can be identified by its chip's serial, not only by
 the tag's SKU - several codes per spool, learned on hand assignment, shared with Spoolman
@@ -36,10 +47,8 @@ The preflight can run the calibration per head at print start (#115).
 **API documentation** for slicers, hosts and scripts now ships with multiACE - see
 [API documentation](#api-documentation-for-slicers-hosts-and-scripts).
 
-**Also:** stock firmware 1.6.0 support, a load fix against crushed tips on reloads,
+**Also:** stock firmware 2.0.0 and 1.6.0 support, a load fix against crushed tips on reloads,
 auto-dry soft start, preflight and web UI fixes, installer fixes.
-
-**V1.00.1b** works with 1.5.2 again
 
 **Nozzle wiper version 2 - new, larger purge bin** (unchanged from 0.99.8b):
 **https://makerworld.com/en/models/3084827** Wiper ·
