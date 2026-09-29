@@ -23,6 +23,7 @@ of the same colour on a free slot and the preflight spreads that colour over bot
 so fewer swaps are needed (a 6 colour print with 28 swaps came down to 7). Works in head
 mode and in multi mode, with a max-copies setting and a strict colour switch; the plans
 re-plan live in the browser. Manual heads take part in the multi preflight as pinned heads.
+(Idea: Dragg30 /snapmaker forum)
 
 **Calibrate button in the PA dialog**
 
