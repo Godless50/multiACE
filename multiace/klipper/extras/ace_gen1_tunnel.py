@@ -28,11 +28,16 @@
 #      the commands, and the release is what leaves the unit in its normal
 #      state.
 #
-# Gen 1 has ONE reader/antenna channel per slot (owner-confirmed):
-# reader = slot (0 -> spool 1, 1 -> spool 3, 2 -> spool 2, 3 -> spool 4).
-# The tag must face the coil: there is no host-side motor control on a
-# Gen-1 that could rotate a spool to look for it (feed/unwind are refused
-# by the stock firmware), so a read is opportunistic by construction.
+# Antenna map (corrected - see the tunnel report, section 4): there are
+# TWO reader antennas, TWO bays each. Antenna 1 covers slots 0 and 1
+# (reader channels 0 and 2), antenna 2 covers slots 2 and 3 (channels 1
+# and 3). The reader CHANNEL for a slot is the bit-swap 0,1,2,3 -> 0,2,1,3,
+# i.e. channel = ((slot & 1) << 1) | ((slot >> 1) & 1) (slot_channel()).
+# The partner slot sharing the same antenna is SLOT ^ 1; the partner
+# reader CHANNEL is CHANNEL ^ 2. The tag must face the coil: there is no
+# host-side motor control on a Gen-1 that could rotate a spool to look for
+# it (feed/unwind are refused by the stock firmware), so a read is
+# opportunistic by construction.
 #
 # Read sequence (tunnel-verified host order, inside ONE acquire/release):
 #   acquire -> SELECT -> TXMODE |= 0x80 -> RXMODE |= 0x80 ->
@@ -48,8 +53,13 @@
 # tunnel builds (CV1.3.87x) AND a probe op answers through the stub; a
 # stock (or older community) unit sees no tunnel traffic at all.
 
-import json
 import logging
+
+# The V2 reader's genuine OpenSpool decoder and BCC-checked UID extraction
+# are reused verbatim here instead of copied (one implementation, one set of
+# verified semantics). ace_rc522 imports only json/logging, so this is safe
+# both from Klipper and from the self-check's synthetic package.
+from .ace_rc522 import AceTagReader
 
 # --- host contract (docs/GEN1_TAG_TUNNEL.md, REPORT-RC522-TUNNEL-EN.md) ----
 
@@ -101,6 +111,21 @@ DEFAULT_TIMEOUT = 3.0        # seconds per tunnel command
 POLL_INTERVAL = 0.005        # reply poll granularity (greenlet-yield safe)
 
 
+def slot_channel(slot):
+    """The RC522 reader channel for an ACE slot (bay order 0..3).
+
+    Two antennas, two bays each: antenna 1 covers slots 0/1 (reader
+    channels 0/2), antenna 2 covers slots 2/3 (channels 1/3). The channel
+    is the bit-swap of the slot - 0,1,2,3 -> 0,2,1,3:
+
+        channel = ((slot & 1) << 1) | ((slot >> 1) & 1)
+
+    The partner sharing the slot's antenna is `slot ^ 1`; its reader
+    channel is `channel ^ 2`. Never pass the raw slot as the reader."""
+    s = int(slot) & 0x3
+    return ((s & 1) << 1) | ((s >> 1) & 1)
+
+
 def pack_index(op, a1=0, a2=0, reader=0):
     """The unsigned packed tunnel request (see the module docstring)."""
     return (TUNNEL_MAGIC | ((int(reader) & 0x3) << 24)
@@ -145,22 +170,11 @@ def firmware_supports_tunnel(firmware):
 def uid_from_page0(data):
     """The 7-byte NTAG UID from a page-0 read (16 bytes), hex, or ''.
 
-    Both ISO14443-3 BCC check bytes are verified: they are the tag's own
-    checksum over exactly these bytes, so a mismatch is a corrupted read
-    (field edge), never a UID. Same rule the V2 reader applies."""
-    try:
-        if len(data) < 9:
-            return ''
-        bcc0 = 0x88 ^ data[0] ^ data[1] ^ data[2]
-        bcc1 = data[4] ^ data[5] ^ data[6] ^ data[7]
-        if data[3] != bcc0 or data[8] != bcc1:
-            return ''
-        uid = bytes(data[0:3] + data[4:8])
-        if not any(uid):
-            return ''
-        return uid.hex().upper()
-    except (TypeError, IndexError):
-        return ''
+    Thin delegation to the V2 reader's BCC-verified extractor
+    (ace_rc522.AceTagReader.uid_from_page0): both ISO14443-3 BCC check
+    bytes must verify, and an all-zero UID is rejected. Same rule the V2
+    reader applies, one implementation."""
+    return AceTagReader.uid_from_page0(data)
 
 
 def classify_page0(data):
@@ -175,62 +189,6 @@ def classify_page0(data):
     except (TypeError, IndexError):
         pass
     return 'unknown'
-
-
-def decode_openspool(data):
-    """Parse an OpenSpool NDEF tag (openspool.io) into an identity dict, or
-    None. Mirrors ace_rc522.AceTagReader._openspool_decode (same byte
-    format, verified against a real tag there): NDEF-message TLV (0x03) ->
-    MIME record 'application/json' -> JSON with type / color_hex / brand.
-    Robust: skips NULL and lock/memory TLVs, tolerates the 3-byte length
-    form."""
-    try:
-        i, n = 0, len(data)
-        while i < n:
-            t = data[i]
-            if t == 0x00:            # NULL padding
-                i += 1
-                continue
-            if t == 0x03:            # NDEF message TLV
-                break
-            if t == 0xFE:            # terminator, no NDEF
-                return None
-            if t in (0x01, 0x02):    # lock / memory-control TLV
-                i += 2 + data[i + 1]
-                continue
-            return None
-        else:
-            return None
-        ln = data[i + 1]
-        if ln == 0xFF:
-            ln = (data[i + 2] << 8) | data[i + 3]
-            p = i + 4
-        else:
-            p = i + 2
-        msg = data[p:p + ln]
-        hdr = msg[0]
-        tl = msg[1]
-        if hdr & 0x10:               # SR: 1-byte payload length
-            pl = msg[2]
-            off = 3
-        else:
-            pl = int.from_bytes(msg[3:7], 'big')
-            off = 6
-        typ = msg[off:off + tl]
-        off += tl
-        payload = msg[off:off + pl]
-        if typ != b'application/json':
-            return None
-        j = json.loads(payload.decode('utf-8', 'replace'))
-        if str(j.get('protocol', '')).lower() != 'openspool':
-            return None
-        return {
-            'material': (j.get('type') or '').strip(),
-            'color': (j.get('color_hex') or '').lstrip('#').upper()[:6],
-            'brand': (j.get('brand') or '').strip(),
-        }
-    except (IndexError, ValueError, TypeError, UnicodeError):
-        return None
 
 
 class Gen1TagTunnel:
@@ -430,38 +388,41 @@ class Gen1TagTunnel:
                 break
             data += chunk
             page += 4
-        return decode_openspool(bytes(data)) if data else None
+        return AceTagReader._openspool_decode(bytes(data)) if data else None
 
     def read_slot(self, slot, page=0, userdata=True):
         """The full operator/auto read: acquire -> SELECT on the slot's
-        antenna -> READ -> release. Returns a dict or None:
+        reader channel -> READ -> release. Returns a dict or None:
 
             {'slot', 'reader', 'page', 'data' (bytes), 'uid' (bare upper
              hex or ''), 'format' ('openspool' | 'anycubic' | 'ntag' |
              'unknown'), 'openspool' (dict or None), 'saved'}
 
-        `userdata` also reads the OpenSpool user pages when page 0 shows a
-        plain NTAG capability container. None = no card / no reply / no
-        tunnel; the release runs on every path."""
+        `reader` is the RC522 channel (slot_channel(slot): 0,1,2,3 ->
+        0,2,1,3), never the raw slot. `userdata` also reads the OpenSpool
+        user pages when page 0 shows a plain NTAG capability container.
+        None = no card / no reply / no tunnel; the release runs on every
+        path."""
         slot = int(slot) & 0x3
+        channel = slot_channel(slot)
         page = int(page) & 0xFF
         saved = self.acquire()
         if saved is None:
             return None
         try:
-            if not self.select(slot):
+            if not self.select(channel):
                 return None
-            data = self.read_page(page, reader=slot)
+            data = self.read_page(page, reader=channel)
             if data is None:
                 return None
             uid = uid_from_page0(data) if page == 0 else ''
             fmt = classify_page0(data)
-            out = {'slot': slot, 'reader': slot, 'page': page,
+            out = {'slot': slot, 'reader': channel, 'page': page,
                    'data': data, 'uid': uid, 'format': fmt,
                    'openspool': None, 'saved': saved}
             if (userdata and uid and page == 0
                     and len(data) >= 16 and data[12] == NTAG_CC_MAGIC):
-                op = self.read_openspool(slot)
+                op = self.read_openspool(channel)
                 if op:
                     out['openspool'] = op
                     out['format'] = 'openspool'

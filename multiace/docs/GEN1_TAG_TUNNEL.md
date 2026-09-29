@@ -14,7 +14,7 @@ Companion documents:
   `REPORT-RC522-TUNNEL-EN.md` in
   <https://github.com/Godless50/ACE-PRO-v1.-NFC-UID>
 * the host implementation: `multiace/klipper/extras/ace_gen1_tunnel.py`
-* the self-check: `multiace/tools/gen1_tag_tunnel_selfcheck.py`
+* the self-check: `tests/gen1_tag_tunnel_selfcheck.py`
 
 ## What it does
 
@@ -26,20 +26,27 @@ Companion documents:
   firmware matches but does not answer, exactly one probe is sent, logged
   once, and the feature is dropped for that firmware.
 * **Reads a tag.** `acquire` (op 7, holds the reader) → `SELECT` on the
-  slot's antenna (op 6) → NTAG `READ(0x30)` of the page (the exact host
-  order: `TXMODE |= 0x80`, `RXMODE |= 0x80`, `BitFraming = 0`, FIFO writes,
-  `TRANSCEIVE`, RX bits, FIFO reads) → `release` (op 8, mandatory). Page 0
-  yields the 7-byte UID with both ISO14443-3 BCC check bytes verified; an
+  slot's reader channel (op 6, `slot_channel(slot)`) → NTAG `READ(0x30)` of
+  the page (the exact host order: `TXMODE |= 0x80`, `RXMODE |= 0x80`,
+  `BitFraming = 0`, FIFO writes, `TRANSCEIVE`, RX bits, FIFO reads) →
+  `release` (op 8, mandatory). Page 0 yields the 7-byte UID with both
+  ISO14443-3 BCC check bytes verified (the shared `ace_rc522` check); an
   NTAG capability container additionally triggers a bounded read of the
-  OpenSpool user area (pages 4..39).
+  OpenSpool user area (pages 4..39), decoded by the shared `ace_rc522`
+  OpenSpool decoder.
 * **Falls back automatically** (when enabled): a slot that is occupied and
   whose tag the firmware did not identify - or whose SKU matches no table
   entry - gets **one opportunistic read per insert**. The result lands in
-  multiACE's own per-unit store, never in `_info_per_ace`, and the card UID
-  is offered to the **existing** tag-bind path (`_spool_bind_by_tag(...,
-  unbind=False)`), so a spool carrying that UID in its SKU/`card_uids`
-  binds without any extra step. `unbind=False` on purpose: a tunnel read
-  must never release a binding the vendor path owns.
+  multiACE's own per-unit store, never in `_info_per_ace`. Binding is
+  **gated on attribution**: the two slots of an antenna pair share one RF
+  path, so the card UID is offered to the **existing** tag-bind path
+  (`_spool_bind_by_tag(..., unbind=False)`) **only when the partner slot
+  (`slot ^ 1`) reads empty in the same status**. An occupied OR
+  unknown/absent partner still stores and surfaces the read but does not
+  bind (a wrong first binding has no repair path on a Gen 1); the operator
+  probe `ACE_TAG_READ` is the explicit override and always binds.
+  `unbind=False` on purpose: a tunnel read must never release a binding
+  the vendor path owns.
 * **Surfaces it.** `get_status`: the slot's `uid` / `tag_format` are filled
   from the tunnel read **only when the device delivered none** (a device
   value always wins), and each ACE carries an additive `tag_tunnel` block:
@@ -51,7 +58,7 @@ Companion documents:
     "reads": {
       "0": {"uid": "04225251C82A81", "format": "openspool",
             "material": "PETG", "color": "DE3530", "brand": "Creality",
-            "age": 12.3}
+            "bound": true, "age": 12.3}
     }
   }
   ```
@@ -101,11 +108,17 @@ ACE_SET_TAG_TUNNEL ENABLE=0|1 [PERSIST=0|1]
   an automatic read cannot rotate a spool to find the tag. The one attempt
   per insert is timed to the firmware's own insert procedure, which already
   rotates the spool; if the read misses, use `ACE_TAG_READ` to retry.
-* **One reader/antenna channel per slot** (`reader = slot`). An earlier
-  live run saw readers 0/2 and 1/3 answer with the same UID; the tunnel
-  report leaves that as an open item (shared RF path or identical tags).
-  Two slots reading the same UID cannot both bind: the existing duplicate
-  guard refuses the second one.
+* **Two antennas, two bays each; reader channel = bit-swap.** Antenna 1
+  covers slots 0 and 1 (reader channels 0 and 2), antenna 2 covers slots 2
+  and 3 (channels 1 and 3). The reader **channel** for a slot is
+  `0,1,2,3 -> 0,2,1,3` (`((slot & 1) << 1) | ((slot >> 1) & 1)`,
+  `slot_channel()`); the **partner slot** sharing the antenna is
+  `slot ^ 1`, whose channel is `channel ^ 2`. An earlier live run saw
+  readers 0/2 and 1/3 answer with the same UID - that is the shared RF
+  path, and the reason the automatic bind is gated on the partner slot
+  reading empty (see above). Two slots reading the same UID cannot both
+  bind: the existing duplicate guard refuses the second one, and an
+  unattributed read is stored but never bound.
 * **Read cost.** One page read is ~25 tunnel commands (~0.5-1 s on the
   wire); the OpenSpool user-area read adds 9 more. A per-command timeout
   bounds every op; a read session is always closed with `release`, and a
@@ -120,31 +133,36 @@ ACE_SET_TAG_TUNNEL ENABLE=0|1 [PERSIST=0|1]
 
 ## Tests
 
-The repository has no test suite for this area; this is the
-test-in-a-script, next to the Gen-1 flasher self-check:
+The repository has no CI beyond the release tarball; this is the
+test-in-a-script, under `tests/` alongside the Gen-1 flasher self-check:
 
 ```sh
-python3 multiace/tools/gen1_tag_tunnel_selfcheck.py
+python3 tests/gen1_tag_tunnel_selfcheck.py
 ```
 
-It imports the real `ace.py` and `ace_gen1_tunnel.py` and drives them on
-hand-built fakes (no Klipper, no hardware): the packing/signed conversion
-and the exact op sequence, the reply parsing (bit-masked `result.code`),
-graceful degradation (stock firmware sends nothing; a matching-but-silent
-firmware gets one probe; a dead link times out bounded), both genuine live
-captures (`04 22 52 FC ...` and `53 42 70 E9 ...`) yielding their bytes and
-UIDs, an OpenSpool NDEF decode, and the ace.py wiring (flag gating, one
-attempt per occupancy, own store, no `_info_per_ace` writes, get_status
-surfacing, unchanged V2 path).
+It imports the real `ace.py`, `ace_gen1_tunnel.py` and `ace_rc522.py` and
+drives them on hand-built fakes (no Klipper, no hardware): the
+packing/signed conversion, the slot -> reader-channel bit-swap map
+(`0,1,2,3 -> 0,2,1,3`), the exact op sequence, the reply parsing
+(bit-masked `result.code`), graceful degradation (stock firmware sends
+nothing; a matching-but-silent firmware gets one probe; a dead link times
+out bounded), both genuine live captures (`04 22 52 FC ...` and
+`53 42 70 E9 ...`) yielding their bytes and UIDs, an OpenSpool NDEF decode
+through the reused `ace_rc522` decoder, and the ace.py wiring (flag
+gating, one attempt per occupancy, the shared-antenna bind gate - partner
+occupied/unknown/absent -> stored but not bound - own store, no
+`_info_per_ace` writes, get_status surfacing, unchanged V2 path).
 
 ## Open points for the maintainer
 
 1. **Flag name / default.** Implemented as `gen1_tag_tunnel`, default
    `false`, setter `ACE_SET_TAG_TUNNEL`. Happy to rename or default it on.
 2. **Surface third-party spools automatically?** The automatic read binds
-   by card UID only when a table entry already carries that UID; it never
-   creates entries and never releases a vendor binding. If the maintainer
-   prefers report-only (no bind call), that is one line to remove.
+   by card UID only when a table entry already carries that UID **and the
+   partner slot on the shared antenna reads empty**; it never creates
+   entries and never releases a vendor binding. If the maintainer prefers
+   report-only (no bind call at all), the `bind=False` path is already the
+   non-binding one.
 3. **Web UI.** The new `tag_tunnel` status block and the slot `uid` /
    `tag_format` fill are already in `get_status`; the web backend passes
    the slot `uid`/`tag_format` through today. Whether to add a Config tab

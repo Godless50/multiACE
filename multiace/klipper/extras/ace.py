@@ -13158,7 +13158,15 @@ class MultiAce:
         firmware rotates the spool during its own insert procedure, and a
         Gen-1 has no host-side motor control to search for it later.
         ACE_TAG_READ is the explicit retry. Never runs on V2; never runs
-        with the feature off; never touches _info_per_ace."""
+        with the feature off; never touches _info_per_ace.
+
+        Binding is gated on ATTRIBUTION: the two slots of an antenna pair
+        (0/2 and 1/3) share one RF path, so a read can belong to either
+        bay. The automatic read binds the slot's spool ONLY when the
+        partner slot (slot ^ 1) reads EMPTY in the same status; an
+        occupied OR unknown/absent partner still stores and surfaces the
+        read but does not bind (a wrong first binding has no repair path
+        here - see the tunnel report, section 4)."""
         try:
             if not self.gen1_tag_tunnel or self._is_v2(idx):
                 return
@@ -13168,7 +13176,8 @@ class MultiAce:
                 return
             tried = self._gen1_tunnel_tried.setdefault(idx, {})
             reads = self._gen1_tunnel_reads.get(idx) or {}
-            for i, slot in enumerate(result.get('slots') or []):
+            slots = result.get('slots') or []
+            for i, slot in enumerate(slots):
                 if not isinstance(slot, dict):
                     continue
                 if self._is_empty_status(slot.get('status', '')):
@@ -13184,8 +13193,15 @@ class MultiAce:
                 # No vendor tag, or one no entry carries: worth a probe.
                 if tried.get(i):
                     continue
+                # Shared-antenna attribution: the partner bay (slot ^ 1)
+                # must read empty; occupied OR unknown/absent is NOT
+                # empty (conservative - do not bind a possibly-wrong read).
+                partner = slots[i ^ 1] if (i ^ 1) < len(slots) else None
+                partner_empty = (isinstance(partner, dict)
+                                 and self._is_empty_status(
+                                     partner.get('status', '')))
                 tried[i] = True
-                self._gen1_tunnel_schedule(idx, i)
+                self._gen1_tunnel_schedule(idx, i, bind=partner_empty)
                 # ONE session per unit at a time: the next candidate (if
                 # any) gets its attempt on a following heartbeat.
                 break
@@ -13197,9 +13213,12 @@ class MultiAce:
             logging.info('[multiACE] gen1 tag tunnel: status tick failed '
                          '(ignored): %s' % e)
 
-    def _gen1_tunnel_schedule(self, idx, slot):
+    def _gen1_tunnel_schedule(self, idx, slot, bind=True):
         """Queue ONE tunnel read in its own greenlet (the reply poll uses
-        reactor.pause, which must not run in the heartbeat callback)."""
+        reactor.pause, which must not run in the heartbeat callback).
+        `bind` carries the shared-antenna attribution decision from the
+        tick through to the store: False still reads and stores, but does
+        not offer the UID to the tag bind."""
         cli = self._gen1_tunnel_client(idx)
         if cli is None:
             return
@@ -13211,7 +13230,8 @@ class MultiAce:
                     return             # one log line, then never again
                 res = cli.read_slot(slot)
                 if res:
-                    self._gen1_tunnel_store(idx, slot, res, why='auto')
+                    self._gen1_tunnel_store(idx, slot, res, why='auto',
+                                            bind=bind)
                 else:
                     logging.info(
                         '[multiACE] gen1 tag tunnel: ACE %d slot %d: no '
@@ -13233,10 +13253,16 @@ class MultiAce:
             logging.info('[multiACE] gen1 tag tunnel: schedule failed '
                          '(ignored): %s' % e)
 
-    def _gen1_tunnel_store(self, idx, slot, res, why='auto'):
+    def _gen1_tunnel_store(self, idx, slot, res, why='auto', bind=True):
         """Record one tunnel read and offer its card UID to the SHARED
         tag-bind path (unbind=False - the tunnel never releases a vendor
-        binding). Own store; the heartbeat's _info_per_ace is untouched."""
+        binding). Own store; the heartbeat's _info_per_ace is untouched.
+
+        `bind` is the shared-antenna attribution gate: the automatic path
+        passes False when the partner slot (slot ^ 1) is occupied or
+        unknown, so a read that could belong to the neighbour bay is
+        STORED and surfaced in get_status but never binds. The manual
+        ACE_TAG_READ path leaves it True (the operator chose the slot)."""
         try:
             op = res.get('openspool') or {}
             ent = {
@@ -13244,14 +13270,18 @@ class MultiAce:
                 'format': res.get('format', 'unknown'),
                 'material': op.get('material', ''),
                 'color': op.get('color', ''),
-                'brand': op.get('brand', ''),
+                # The V2 decoder names this 'vendor' (OpenSpool's JSON
+                # 'brand'); keep the stored/status key as 'brand'.
+                'brand': op.get('vendor', ''),
                 'page0': ' '.join('%02X' % b
                                   for b in bytes(res.get('data') or b'')),
                 'ts': self.reactor.monotonic(),
                 'why': why,
+                'bound': False,
             }
-            self._gen1_tunnel_reads.setdefault(idx, {})[slot] = ent
             uid = ent['uid']
+            ent['bound'] = bool(uid and bind)
+            self._gen1_tunnel_reads.setdefault(idx, {})[slot] = ent
             if uid:
                 logging.info(
                     '[multiACE] [spool] gen1 tunnel read ACE %d slot %d: '
@@ -13260,7 +13290,17 @@ class MultiAce:
                     ' - OpenSpool %s %s %s' % (
                         ent['material'] or '?', ent['color'] or '?',
                         ent['brand'] or '?') if op else '')
-                self._spool_bind_by_tag(idx, slot, uid, unbind=False)
+                if bind:
+                    self._spool_bind_by_tag(idx, slot, uid, unbind=False)
+                else:
+                    logging.info(
+                        '[multiACE] gen1 tunnel read ACE %d slot %d: card '
+                        'UID %s (%s) STORED but NOT bound - the partner '
+                        'slot on the shared antenna is occupied or '
+                        'unknown, so the read cannot be attributed to this '
+                        'slot; ACE_TAG_READ is the operator probe',
+                        self._disp(idx), self._disp(slot), uid,
+                        ent['format'])
             else:
                 logging.info(
                     '[multiACE] gen1 tunnel read ACE %d slot %d: a card '
@@ -13287,6 +13327,7 @@ class MultiAce:
                 'material': ent.get('material', ''),
                 'color': ent.get('color', ''),
                 'brand': ent.get('brand', ''),
+                'bound': bool(ent.get('bound', False)),
                 'age': max(0.0, now - float(ent.get('ts', now))),
             }
         return out
@@ -14740,7 +14781,7 @@ class MultiAce:
                     extra = (' - OpenSpool tag: %s %s %s'
                              % (op.get('material') or '?',
                                 op.get('color') or '?',
-                                op.get('brand') or '?'))
+                                op.get('vendor') or '?'))
                 elif fmt == 'ntag':
                     extra = ' - plain NTAG (no OpenSpool NDEF record)'
                 elif fmt == 'anycubic':

@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """Self-check for the Gen-1 (ACE Pro) tag tunnel.
 
-The repository has no test suite for this area (no tests/ directory, no CI
-beyond the release tarball), so this is the test-in-a-script - like
-tools/gen1_flasher_selfcheck.py and tools/ace_set_humidity_selfcheck.py. It
-imports the REAL modules (klipper/extras/ace.py and
-klipper/extras/ace_gen1_tunnel.py, from the repo checkout or a printer
-install) and drives the real code on hand-built fakes: no Klipper, no
-hardware, no serial ports.
+The repository has no CI beyond the release tarball, so this is the
+test-in-a-script - like tools/gen1_flasher_selfcheck.py and
+tools/ace_set_humidity_selfcheck.py - and lives under tests/ now. It
+imports the REAL modules (klipper/extras/ace.py,
+klipper/extras/ace_gen1_tunnel.py and klipper/extras/ace_rc522.py, from
+the repo checkout or a printer install) and drives the real code on
+hand-built fakes: no Klipper, no hardware, no serial ports.
 
 Covered, as required for the PR:
   (a) the packed index, the SIGNED 32-bit wire form (pinned against the
-      tunnel notes' own vectors) and the exact op sequence of a read -
+      tunnel notes' own vectors), the slot -> reader-CHANNEL bit-swap map
+      (0,1,2,3 -> 0,2,1,3) and the exact op sequence of a read -
       acquire -> SELECT -> TXMODE/RXMODE/BitFraming -> FIFO writes ->
       TRANSCEIVE -> RX bits -> FIFO reads -> release;
   (b) reply parsing: only `result.code` counts (a stock top-level `code` is
@@ -21,15 +22,17 @@ Covered, as required for the PR:
       after one command, and a dead link times out bounded - all as "no
       tunnel", never an exception;
   (d) a successful read yields the expected bytes/UID for BOTH genuine live
-      captures, and an OpenSpool NTAG decode produces the identity;
+      captures, and an OpenSpool NTAG decode produces the identity (the
+      reused ace_rc522 decoder);
   (e) the ace.py wiring: the enable flag gates only the automatic fallback,
       ACE_TAG_READ works with the flag off, one attempt per occupancy, the
-      own store never writes _info_per_ace, get_status surfaces uid/
-      tag_format/tag_tunnel, and the V2 path is unchanged.
+      shared-antenna bind gate (bind only when the partner slot reads
+      empty), the own store never writes _info_per_ace, get_status surfaces
+      uid/tag_format/tag_tunnel, and the V2 path is unchanged.
 
-Run it after touching either module:
+Run it after touching any of the modules:
 
-    python3 gen1_tag_tunnel_selfcheck.py
+    python3 tests/gen1_tag_tunnel_selfcheck.py
 
 Exit codes:
     0  every check passed
@@ -54,10 +57,11 @@ logging.disable(logging.INFO)
 
 
 def find_extras():
-    here = os.path.dirname(os.path.abspath(__file__))
+    here = os.path.dirname(os.path.abspath(__file__))          # <repo>/tests
     candidates = [
         os.environ.get("MULTIACE_KLIPPY_EXTRAS"),
-        os.path.join(os.path.dirname(here), "klipper", "extras"),  # repo
+        os.path.join(os.path.dirname(here),                       # repo
+                     "multiace", "klipper", "extras"),
         "/home/lava/klipper/klippy/extras",                       # printer
         os.path.join(os.path.expanduser("~"), "klipper", "klippy", "extras"),
     ]
@@ -70,7 +74,7 @@ def find_extras():
 
 EXTRAS = find_extras()
 if EXTRAS is None:
-    print("[FAIL] ace.py / ace_gen1_tunnel.py not found - set "
+    print("[FAIL] ace.py / ace_gen1_tunnel.py / ace_rc522.py not found - set "
           "MULTIACE_KLIPPY_EXTRAS to the klippy/extras directory")
     sys.exit(2)
 
@@ -203,7 +207,7 @@ def openspool_ndef(material='PETG', color='DE3530', brand='Creality'):
 # 1. (a) packing, signed form, op constants
 # ==========================================================================
 
-print("--- 1. pack_index / as_signed32 / op sequence ---")
+print("--- 1. pack_index / as_signed32 / slot_channel / op constants ---")
 
 check("magic is 0x80000000", T.TUNNEL_MAGIC == 0x80000000)
 check("op 0 reg 0x37 packs to 0x80003700",
@@ -246,6 +250,14 @@ check("firmware gate: UID-only community CV1.3.863 rejected",
       T.firmware_supports_tunnel('CV1.3.863') is False)
 check("firmware gate: empty string rejected",
       T.firmware_supports_tunnel('') is False)
+check("slot_channel maps bays to reader channels 0,2,1,3 (bit-swap)",
+      [T.slot_channel(s) for s in range(4)] == [0, 2, 1, 3])
+check("... the same-antenna partner slot ^ 1 sits on channel ^ 2",
+      all(T.slot_channel(s ^ 1) == (T.slot_channel(s) ^ 2)
+          for s in range(4)))
+check("... out-of-range slots wrap into bay order",
+      T.slot_channel(4) == T.slot_channel(0)
+      and T.slot_channel(-1) == T.slot_channel(3))
 
 # ==========================================================================
 # 2. (b) reply parsing
@@ -310,14 +322,25 @@ client_ace = FakeAce(read_script([(0, CAP_B)]))
 client = T.Gen1TagTunnel(client_ace, 0)
 res = client.read_slot(2, userdata=False)
 seq = [unpack(s[2]) for s in client_ace.sent]
-check("slot 2 selects reader 2 (one reader/antenna per slot)",
-      seq[1] == (2, 6, 0, 0) and seq[0] == (0, 7, 0, 0)
+check("slot 2 selects reader channel 1 (bit-swap, NOT reader = slot)",
+      seq[1] == (1, 6, 0, 0) and seq[0] == (0, 7, 0, 0)
       and seq[-1][1] == 8)
-check("... and reads all 16 bytes on reader 2",
-      all(op[0] == 2 for op in seq[2:-1] if op[1] in (2, 3, 4, 5)))
+check("... and reads all 16 bytes on reader channel 1",
+      all(op[0] == 1 for op in seq[2:-1] if op[1] in (2, 3, 4, 5)))
+check("... the returned reader field is the channel (1), not the slot (2)",
+      res is not None and res['reader'] == 1)
 check("second capture yields UID 534270E9D1B500",
       res is not None and res['uid'] == UID_B
       and res['data'] == CAP_B)
+
+# Slot 1 is the other half of the swap: it must address channel 2.
+client_ace = FakeAce(read_script([(0, CAP_B)]))
+client = T.Gen1TagTunnel(client_ace, 0)
+res = client.read_slot(1, userdata=False)
+seq = [unpack(s[2]) for s in client_ace.sent]
+check("slot 1 selects reader channel 2 (the swapped partner of slot 2)",
+      seq[1] == (2, 6, 0, 0) and res['reader'] == 2
+      and all(op[0] == 2 for op in seq[2:-1] if op[1] in (2, 3, 4, 5)))
 
 # Bad BCC must refuse the UID (field-edge corruption is not an identity).
 bad = bytearray(CAP_A)
@@ -326,6 +349,12 @@ check("a flipped UID byte fails the BCC check -> no UID",
       T.uid_from_page0(bytes(bad)) == '')
 check("uid_from_page0 on a short read -> ''",
       T.uid_from_page0(b'\x04\x22') == '')
+check("uid_from_page0 is the shared ace_rc522 BCC check (same result)",
+      T.uid_from_page0(CAP_A) == UID_A
+      and T.uid_from_page0(CAP_A) == T.AceTagReader.uid_from_page0(CAP_A))
+check("... and the shared check rejects empty / all-zero data",
+      T.AceTagReader.uid_from_page0(b'') == ''
+      and T.AceTagReader.uid_from_page0(bytes(16)) == '')
 
 # ==========================================================================
 # 4. OpenSpool decode
@@ -345,17 +374,21 @@ client = T.Gen1TagTunnel(client_ace, 0)
 res = client.read_slot(0)                     # userdata defaults on
 check("OpenSpool tag: format upgraded to openspool",
       res is not None and res['format'] == 'openspool')
-check("OpenSpool identity decoded (material/colour/brand)",
+check("OpenSpool identity decoded by the REUSED ace_rc522 decoder "
+      "(material/colour/vendor + temps)",
       res is not None and res['openspool'] == {
-          'material': 'PETG', 'color': 'DE3530', 'brand': 'Creality'},
+          'material': 'PETG', 'color': 'DE3530', 'vendor': 'Creality',
+          'min_temp': None, 'max_temp': None},
       "%s" % (res and res.get('openspool'),))
 check("the user-page reads stay inside the same acquire/release hold",
       unpack(client_ace.sent[0][2])[1] == 7
       and unpack(client_ace.sent[-1][2])[1] == 8)
 check("a plain capture without NDEF decodes to None",
-      T.decode_openspool(CAP_A) is None)
+      T.AceTagReader._openspool_decode(CAP_A) is None)
 check("garbage NDEF does not raise",
-      T.decode_openspool(b'\x03\xff\xff\xffzz') is None)
+      T.AceTagReader._openspool_decode(b'\x03\xff\xff\xffzz') is None)
+check("the tunnel module no longer carries its own decoder copy",
+      not hasattr(T, 'decode_openspool'))
 
 # ==========================================================================
 # 5. (c) graceful degradation
@@ -697,6 +730,74 @@ check("... and the next insert is worth a fresh attempt",
 run_async(inst, 1)
 check("... which the fake client served again",
       fake_cli.calls == [(0, 0), (0, 0)], fake_cli.calls)
+check("... and the bind is marked as taken in the store/status",
+      inst._gen1_tunnel_reads[0][0]['bound'] is True
+      and inst.get_status()['aces'][0]['tag_tunnel']['reads']['0']['bound']
+      is True)
+
+# 6a-bis. Shared-antenna bind gate: the neighbour bay decides attribution.
+# (The default fake has slot 0 occupied and slot 1 'empty1' = partner empty
+#  -> bind, covered above.) Partner OCCUPIED: store and surface, no bind.
+def auto_read_into_store(partner_status='empty1', drop_partner=False,
+                         cand=0):
+    """One auto read of `cand` with every other slot empty, then the
+    partner slot (cand ^ 1) set as asked; returns the wired instance."""
+    cli = FakeClient(result={'slot': cand, 'reader': T.slot_channel(cand),
+                             'page': 0, 'data': CAP_A, 'uid': UID_A,
+                             'format': 'ntag', 'openspool': None, 'saved': 7})
+    ii = make_ace(flag=True)
+    slots = ii._info_per_ace[0]['slots']
+    for s in slots:
+        s['status'] = 'empty1'
+    slots[cand]['status'] = 'ready'
+    if drop_partner:
+        # A short/malformed status: the partner index is out of range.
+        ii._info_per_ace[0]['slots'] = [slots[cand]]
+    else:
+        slots[cand ^ 1]['status'] = partner_status
+    ii._gen1_tunnel_clients[0] = cli
+    ii._gen1_tunnel_client = lambda idx: cli
+    ii._gen1_tunnel_status_tick(0, ii._info_per_ace[0])
+    run_async(ii, 1)
+    return ii
+
+
+gate_occ = auto_read_into_store(partner_status='ready')   # slot 1 occupied
+check("bind gate: partner slot occupied -> the read is still STORED",
+      gate_occ._gen1_tunnel_reads.get(0, {}).get(0, {}).get('uid') == UID_A)
+check("... but NOT offered to the shared bind", gate_occ.bind_calls == [],
+      gate_occ.bind_calls)
+check("... and get_status still surfaces the read (uid + bound False)",
+      gate_occ.get_status()['aces'][0]['slots'][0]['uid'] == UID_A
+      and gate_occ.get_status()['aces'][0]['tag_tunnel'][
+          'reads']['0']['bound'] is False)
+gate_occ_src = open(os.path.join(EXTRAS, 'ace.py'), encoding='utf-8').read()
+check("... the non-bind log names the shared antenna + the operator probe",
+      'STORED but NOT bound' in gate_occ_src
+      and 'ACE_TAG_READ is the operator probe' in gate_occ_src)
+
+# Partner UNKNOWN status (not an 'empty*' string) -> conservative, no bind.
+gate_unk = auto_read_into_store(partner_status='busy')
+check("bind gate: partner status unknown -> NOT bound",
+      gate_unk.bind_calls == []
+      and gate_unk._gen1_tunnel_reads.get(0, {}).get(0, {}).get('uid') == UID_A)
+
+# Partner ABSENT from the status slots -> conservative, no bind.
+gate_abs = auto_read_into_store(drop_partner=True)
+check("bind gate: partner slot absent -> NOT bound",
+      gate_abs.bind_calls == []
+      and gate_abs.get_status()['aces'][0]['slots'][0]['uid'] == UID_A)
+
+# The 2/3 antenna pair behaves the same as 0/1 (slot 2 -> partner 3).
+gate_pair2 = auto_read_into_store(partner_status='ready', cand=2)
+check("bind gate: same rule on the 2/3 antenna pair (slot 2 vs 3)",
+      gate_pair2.bind_calls == []
+      and gate_pair2._gen1_tunnel_reads.get(0, {}).get(2, {}).get('uid')
+      == UID_A)
+gate_pair2_empty = auto_read_into_store(partner_status='empty1', cand=2)
+check("... and slot 2 binds when slot 3 reads empty",
+      gate_pair2_empty.bind_calls == [(0, 2, UID_A, False)],
+      gate_pair2_empty.bind_calls)
 
 # A recognized vendor tag: no tunnel traffic.
 inst2 = make_ace(flag=True)
@@ -752,7 +853,7 @@ check("... and names the volatility",
 
 # 6c. ACE_TAG_READ on Gen 1: explicit command works with the flag OFF.
 inst = make_ace(flag=False)
-fake_cli = FakeClient(result={'slot': 1, 'reader': 1, 'page': 0,
+fake_cli = FakeClient(result={'slot': 1, 'reader': 2, 'page': 0,
                               'data': CAP_B, 'uid': UID_B, 'format': 'ntag',
                               'openspool': None, 'saved': 7})
 inst._gen1_tunnel_client = lambda idx: fake_cli
@@ -773,6 +874,11 @@ check("... prints the UID and the third-party line",
 check("... stores the manual read and releases busy",
       inst._gen1_tunnel_reads.get(0, {}).get(1, {}).get('uid') == UID_B
       and inst._gen1_tunnel_busy == set())
+check("... the manual read still BINDS (operator chose the slot, partner "
+      "slot 0 is occupied)",
+      inst.bind_calls == [(0, 1, UID_B, False)]
+      and inst._gen1_tunnel_reads[0][1]['bound'] is True,
+      inst.bind_calls)
 check("... reports the outcome through the tag_op status contract",
       inst._tag_op_result == {'ok': True, 'kind': 'read',
                               'seq': inst._tag_op_seq,
@@ -829,6 +935,14 @@ check("the Gen-1 helper is imported lazily, never at module level",
       'from .ace_gen1_tunnel import' in src
       and '\nfrom .ace_gen1_tunnel' not in src
       and '\nimport ace_gen1_tunnel' not in src)
+gsrc = open(os.path.join(EXTRAS, 'ace_gen1_tunnel.py'),
+            encoding='utf-8').read()
+check("the tunnel module reuses the ace_rc522 readers (relative import)",
+      'from .ace_rc522 import AceTagReader' in gsrc
+      and 'def decode_openspool' not in gsrc)
+check("... and no longer carries its own BCC UID copy",
+      'bcc0 = 0x88 ^ data[0]' not in gsrc
+      and 'def uid_from_page0' in gsrc)
 
 # --- summary ---------------------------------------------------------------
 
