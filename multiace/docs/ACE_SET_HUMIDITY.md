@@ -138,7 +138,7 @@ The project has no test suite; this is the test-in-a-script, next to the
 Gen-1 flasher self-check:
 
 ```sh
-python3 multiace/tools/ace_set_humidity_selfcheck.py
+python3 tests/ace_set_humidity_selfcheck.py
 ```
 
 It imports the real `ace.py` and drives the real methods on a faked instance

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Self-check for external humidity (ACE_SET_HUMIDITY) in ace.py.
 
-The repository has no test suite (no tests/ directory, no CI beyond the
-release tarball), so this is the test-in-a-script - like
+The repository has no test suite (no CI beyond the release tarball), so
+this is the test-in-a-script - like
 tools/gen1_flasher_selfcheck.py. It imports the REAL multiACE module
 (klipper/extras/ace.py, from the repo checkout or from a printer install)
 and drives the real methods on a hand-built instance: no Klipper, no
@@ -20,7 +20,7 @@ Covered, as required for the PR:
 
 Run it after touching ace.py:
 
-    python3 ace_set_humidity_selfcheck.py
+    python3 tests/ace_set_humidity_selfcheck.py
 
 Exit codes:
     0  every check passed
@@ -46,7 +46,8 @@ def find_extras():
     here = os.path.dirname(os.path.abspath(__file__))
     candidates = [
         os.environ.get("MULTIACE_KLIPPY_EXTRAS"),
-        os.path.join(os.path.dirname(here), "klipper", "extras"),  # repo
+        os.path.join(os.path.dirname(here), "multiace",
+                     "klipper", "extras"),                        # repo
         "/home/lava/klipper/klippy/extras",                       # printer
         os.path.join(os.path.expanduser("~"), "klipper", "klippy", "extras"),
     ]
@@ -74,7 +75,9 @@ except Exception as e:                                      # pragma: no cover
     print("[FAIL] cannot import ace.py from %s: %s" % (EXTRAS, e))
     sys.exit(2)
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# The multiACE package directory (this file lives in tests/ at the repo root).
+REPO = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "multiace")
 CATALOG = A._load_i18n_catalog(os.path.join(REPO, "i18n"), "en")
 
 FAILED = []
