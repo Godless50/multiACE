@@ -16,7 +16,7 @@ command.
 | `klipper/extras/ace.py` | `ACE_FW_RELEASE` no longer refuses a V1 - the gate now accepts both generations (no new command; `ACE_FW_RESUME` was already generation-agnostic). |
 | `web/frontend/app.js`, `index.html` | the firmware card lists both generations; selecting a V1 switches the allowlist and hides the Gen-2-only fields (`.swu` password, ACE2-Open patch, force). |
 | `i18n/en.json`, `i18n/de.json` | the few new strings. `zh.json` has no acefw block upstream, so it keeps falling back to English. |
-| `tools/gen1_flasher_selfcheck.py` | **new.** The project has no test suite, so this is the test-in-a-script: protocol vectors plus a full simulated flash over a fake transport (no hardware, no pyserial). |
+| `tests/gen1_flasher_selfcheck.py` | **new.** The project has no test suite, so this is the test-in-a-script: protocol vectors plus a full simulated flash over a fake transport (no hardware, no pyserial). |
 | `docs/GEN1_FLASH.md` | this note. |
 
 ## Why a separate transport, not a mode in `ace2_ota.py`

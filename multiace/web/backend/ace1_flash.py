@@ -179,6 +179,15 @@ class Gen1Transport:
     """
 
     def __init__(self, port: str):
+        self.port = port
+        self.ser = self._open_serial()
+        self.buf = bytearray()
+        self._id = 0
+
+    def _open_serial(self, tries=OPEN_TRIES):
+        """Open the released port, retrying a transient EBUSY. Returns the
+        serial object; raises FlashError (same message as before) when the
+        port stays shut for every try."""
         try:
             import serial
         except ImportError:
@@ -191,30 +200,38 @@ class Gen1Transport:
         # the open like the bench flasher does instead of failing the
         # flash on a transient EBUSY.
         last = None
-        self.ser = None
-        for _ in range(OPEN_TRIES):
+        ser = None
+        for _ in range(tries):
             try:
-                self.ser = serial.Serial(port, BAUD,
-                                         timeout=SERIAL_TIMEOUT,
-                                         rtscts=True, exclusive=True)
+                ser = serial.Serial(self.port, BAUD,
+                                    timeout=SERIAL_TIMEOUT,
+                                    rtscts=True, exclusive=True)
                 break
             except Exception as e:
                 last = e
                 time.sleep(OPEN_RETRY_IVL)
-        if self.ser is None:
+        if ser is None:
             raise FlashError(
                 "cannot open %s after %d tries (%s) - is the unit powered "
-                "and the port released (ACE_FW_RELEASE)?" % (port,
-                                                             OPEN_TRIES, last))
-        self.port = port
-        self.buf = bytearray()
-        self._id = 0
+                "and the port released (ACE_FW_RELEASE)?" % (self.port,
+                                                             tries, last))
+        return ser
 
     def close(self):
         try:
             self.ser.close()
         except Exception:
             pass
+
+    def reopen(self):
+        """Drop the dead fd and open the port again. An ACE Pro resets and
+        re-enumerates on USB after `iap_upgrade_finish`, and also while it
+        sits idle (~every 3.5 s), so the fd held before the reset is gone;
+        polling it would report 'not heard' for a unit that is fine. No
+        stale bytes may survive from the old fd."""
+        self.close()
+        self.ser = self._open_serial()
+        self.buf = bytearray()
 
     def pump(self, dur: float):
         """Read for up to dur seconds, return every complete frame's
@@ -268,11 +285,18 @@ class Gen1Transport:
     def prime(self, tries: int = 40, ivl: float = 0.3) -> bool:
         """Wait for the unit to answer on the released port. The unit
         resets itself while idle (~3.3 s), so the first requests may time
-        out - keep asking; get_status is read-only and cheap."""
+        out - keep asking; get_status is read-only and cheap. A probe with
+        no answer (None or an error) may mean the fd points at a unit that
+        just re-enumerated, so reopen before the next try; a reopen that
+        fails must not abort the wait, the loop tries again later."""
         for _ in range(tries):
             try:
                 if self.rpc("get_status", timeout=1.0) is not None:
                     return True
+            except Exception:
+                pass
+            try:
+                self.reopen()
             except Exception:
                 pass
             time.sleep(ivl)
@@ -458,6 +482,14 @@ def flash(port: str, fw, progress,
             if r is not None:
                 new_ver = _fw_version(r)
                 break
+            # No answer: the commit rebooted the unit and an ACE Pro
+            # re-enumerates on USB, so the fd polled before the commit is
+            # dead. Reopen it before the next probe (a failed reopen must
+            # not abort the wait) so a unit that is fine is actually heard.
+            try:
+                transport.reopen()
+            except Exception:
+                pass
             time.sleep(0.5)
 
         # get_info alone is not proof of life (a unit sitting in the

@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """Self-check for the Gen 1 (ACE Pro) flasher - web/backend/ace1_flash.py.
 
-The repository has no test suite (no tests/ directory, no CI beyond the
-release tarball), so this is the test-in-a-script for the Gen-1 flasher:
-the pure protocol parts plus a FULL simulated flash against an in-process
-fake transport. No hardware, no pyserial, no serial port needed.
+The repository has no test runner and no CI beyond the release tarball:
+tests/ holds the test-in-a-script files, run directly. This is the one
+for the Gen-1 flasher: the pure protocol parts plus a FULL simulated flash
+against an in-process fake transport. No hardware, no pyserial, no serial
+port needed.
 
 Run it after touching ace1_flash.py:
 
-    python3 gen1_flasher_selfcheck.py
+    python3 tests/gen1_flasher_selfcheck.py
 
 On the printer (or a dev box) with real images, also verify the shipped
 tested-images entries byte-for-byte:
 
-    python3 gen1_flasher_selfcheck.py \
+    python3 tests/gen1_flasher_selfcheck.py \
         --image ACE_V1.3.863_20260716.bin --entry 1.3.863-opencubic
 
 Exit codes:
@@ -33,12 +34,15 @@ import tempfile
 # --- locate the backend module (repo checkout OR installed web head) ------
 
 def find_backend():
-    here = os.path.dirname(os.path.abspath(__file__))
     candidates = [
         os.environ.get("MULTIACE_BACKEND"),
-        os.path.join(os.path.dirname(here), "web", "backend"),  # repo
+        # repo checkout: this file lives in <repo>/tests/
+        os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "multiace", "web", "backend"),
         "/home/lava/multiace_web/backend",                       # printer
-        os.path.join(here, "backend"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     "backend"),
     ]
     for c in candidates:
         if c and os.path.isfile(os.path.join(c, "ace1_flash.py")):
@@ -151,6 +155,7 @@ class FakeTransport:
         self.finished = False
         self.polls_after_finish = 0
         self.closed = False
+        self.reopens = 0
         FakeTransport.last = self
 
     def prime(self, tries=40, ivl=0.3):
@@ -184,6 +189,12 @@ class FakeTransport:
     def close(self):
         self.closed = True
 
+    def reopen(self):
+        # The real transport drops the fd from before the commit reboot
+        # and opens the port again when a post-finish probe finds nothing.
+        self.reopens += 1
+        self.closed = False
+
 
 real_transport = ACE1.Gen1Transport
 ACE1.Gen1Transport = FakeTransport
@@ -215,6 +226,7 @@ check("flash: result verified, unit heard after reboot, app answers",
       res.get("verified") is True and res.get("new") == "CV1.3.863"
       and res.get("app_alive") is True, str(res))
 check("flash: transport closed", t.closed)
+check("flash: reopens the port after the commit reboot", t.reopens == 1)
 check("flash: progress reached 100 with messages",
       any(p == 100.0 for p, _ in progress) and all(m for _, m in progress))
 
